@@ -82,12 +82,79 @@ struct Knob: View {
     }
 }
 
+/// A scrolling spectrogram: frequency runs left to right and time falls down
+/// the display, with the newest processed-audio slice at the bottom.
+struct WaterfallSpectrumView: View {
+    let history: [[Float]]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("Processed spectrum", systemImage: "water.waves")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("newest")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Canvas { context, size in
+                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.015, green: 0.025, blue: 0.08)))
+                guard let bandCount = history.last?.count, bandCount > 0, !history.isEmpty else { return }
+                let cellWidth = size.width / CGFloat(bandCount)
+                let cellHeight = size.height / CGFloat(history.count)
+                for (row, spectrum) in history.enumerated() {
+                    let y = CGFloat(row) * cellHeight
+                    for (band, level) in spectrum.enumerated() {
+                        let value = max(0, min(1, level))
+                        let color = waterfallColor(value)
+                        let rect = CGRect(x: CGFloat(band) * cellWidth,
+                                          y: y,
+                                          width: cellWidth + 0.5,
+                                          height: cellHeight + 0.5)
+                        context.fill(Path(rect), with: .color(color))
+                    }
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.12)))
+
+            HStack {
+                Text("60 Hz")
+                Spacer()
+                Text("1 kHz")
+                Spacer()
+                Text("12 kHz")
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Live processed audio waterfall spectrum")
+    }
+
+    private func waterfallColor(_ value: Float) -> Color {
+        let v = Double(value)
+        if v < 0.35 {
+            let t = v / 0.35
+            return Color(red: 0.02, green: 0.08 + 0.35 * t, blue: 0.22 + 0.55 * t)
+        } else if v < 0.7 {
+            let t = (v - 0.35) / 0.35
+            return Color(red: 0.02 + 0.18 * t, green: 0.43 + 0.48 * t, blue: 0.77 - 0.55 * t)
+        } else {
+            let t = (v - 0.7) / 0.3
+            return Color(red: 0.2 + 0.8 * t, green: 0.91 - 0.18 * t, blue: 0.22 - 0.16 * t)
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var engine = VoiceScramblerEngine()
     @State private var showResetConfirmation = false
     @State private var showBlend = false
     @State private var blendA: ScramblerPreset = .deepAnonymous
     @State private var blendB: ScramblerPreset = .telephone
+    @State private var showSaveSettings = false
+    @State private var savedSettingsName = ""
 
     var body: some View {
         VStack(spacing: 14) {
@@ -132,6 +199,12 @@ struct ContentView: View {
 
             presetBar
 
+            if engine.isRunning {
+                WaterfallSpectrumView(history: engine.spectrumHistory)
+                    .frame(height: 125)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             if let message = engine.errorMessage {
                 Text(message)
                     .font(.callout)
@@ -158,6 +231,17 @@ struct ContentView: View {
         } message: {
             Text("Pitch, EQ, effects and compression go back to defaults. Your recordings are not affected.")
         }
+        .alert("Save Current Settings", isPresented: $showSaveSettings) {
+            TextField("Name", text: $savedSettingsName)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                engine.saveCurrentSettings(named: savedSettingsName)
+                savedSettingsName = ""
+            }
+            .disabled(savedSettingsName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Saving with an existing name updates that saved setting.")
+        }
     }
 
     // MARK: - Presets / reset
@@ -166,6 +250,13 @@ struct ContentView: View {
         VStack(spacing: 6) {
             HStack(spacing: 8) {
                 Menu {
+                    if !engine.savedSettings.isEmpty {
+                        Section("Your Settings") {
+                            ForEach(engine.savedSettings) { saved in
+                                Button(saved.name) { engine.loadSavedSettings(saved) }
+                            }
+                        }
+                    }
                     ForEach(ScramblerPreset.Category.allCases, id: \.self) { category in
                         Section(category.rawValue) {
                             ForEach(ScramblerPreset.allCases.filter { $0.category == category }) { preset in
@@ -178,6 +269,30 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: 220)
 
+                Button {
+                    savedSettingsName = activeSavedName ?? presetLabel
+                    if savedSettingsName == "Custom" { savedSettingsName = "" }
+                    showSaveSettings = true
+                } label: {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                }
+                .help("Save the current sound settings")
+
+                if !engine.savedSettings.isEmpty {
+                    Menu {
+                        ForEach(engine.savedSettings) { saved in
+                            Button("Delete \(saved.name)", role: .destructive) {
+                                engine.deleteSavedSettings(saved)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .help("Delete saved settings")
+                }
+            }
+
+            HStack(spacing: 8) {
                 Button {
                     engine.randomize()
                 } label: {
@@ -228,7 +343,12 @@ struct ContentView: View {
         if let pair = engine.blendPair {
             return "\(pair.a.rawValue) × \(pair.b.rawValue)"
         }
-        return engine.activePreset?.rawValue ?? "Custom"
+        return activeSavedName ?? engine.activePreset?.rawValue ?? "Custom"
+    }
+
+    private var activeSavedName: String? {
+        guard let id = engine.activeSavedSettingID else { return nil }
+        return engine.savedSettings.first { $0.id == id }?.name
     }
 
     /// Two presets and a crossfade between them. Continuous values interpolate;

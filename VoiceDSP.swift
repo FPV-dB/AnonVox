@@ -1,6 +1,99 @@
 import Accelerate
 import Foundation
 
+/// Fixed-allocation FFT analyser used by the output tap. It publishes 96
+/// logarithmically-spaced bands from 60 Hz to 12 kHz (or Nyquist) as 0...1
+/// levels, where 0 is -80 dBFS and 1 is 0 dBFS.
+final class SpectrumAnalyzer {
+    private let fftSize = 2048
+    private let bins = 1024
+    private let bandCount = 96
+    private let sampleRate: Float
+    private let lock = NSLock()
+    private var fftSetup: FFTSetup
+    private let input: UnsafeMutablePointer<Float>
+    private let window: UnsafeMutablePointer<Float>
+    private let frame: UnsafeMutablePointer<Float>
+    private let real: UnsafeMutablePointer<Float>
+    private let imaginary: UnsafeMutablePointer<Float>
+    private let magnitudes: UnsafeMutablePointer<Float>
+    private let bands: UnsafeMutablePointer<Float>
+    private let nextBands: UnsafeMutablePointer<Float>
+    private var inputCount = 0
+
+    init(sampleRate: Float) {
+        self.sampleRate = sampleRate
+        fftSetup = vDSP_create_fftsetup(11, FFTRadix(kFFTRadix2))!
+        func allocate(_ count: Int) -> UnsafeMutablePointer<Float> {
+            let pointer = UnsafeMutablePointer<Float>.allocate(capacity: count)
+            pointer.initialize(repeating: 0, count: count)
+            return pointer
+        }
+        input = allocate(fftSize)
+        window = allocate(fftSize)
+        frame = allocate(fftSize)
+        real = allocate(bins)
+        imaginary = allocate(bins)
+        magnitudes = allocate(bins)
+        bands = allocate(bandCount)
+        nextBands = allocate(bandCount)
+        vDSP_hann_window(window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+    }
+
+    deinit {
+        vDSP_destroy_fftsetup(fftSetup)
+        [input, window, frame, real, imaginary, magnitudes, bands, nextBands].forEach { $0.deallocate() }
+    }
+
+    func process(_ samples: UnsafePointer<Float>, count: Int) {
+        var sourceOffset = 0
+        while sourceOffset < count {
+            let copied = min(fftSize - inputCount, count - sourceOffset)
+            (input + inputCount).update(from: samples + sourceOffset, count: copied)
+            inputCount += copied
+            sourceOffset += copied
+            guard inputCount == fftSize else { continue }
+            analyseFrame()
+            inputCount = 0
+        }
+    }
+
+    func snapshot() -> [Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(UnsafeBufferPointer(start: bands, count: bandCount))
+    }
+
+    private func analyseFrame() {
+        vDSP_vmul(input, 1, window, 1, frame, 1, vDSP_Length(fftSize))
+        var split = DSPSplitComplex(realp: real, imagp: imaginary)
+        frame.withMemoryRebound(to: DSPComplex.self, capacity: bins) { complex in
+            vDSP_ctoz(complex, 2, &split, 1, vDSP_Length(bins))
+        }
+        vDSP_fft_zrip(fftSetup, &split, 1, 11, FFTDirection(kFFTDirection_Forward))
+        imaginary[0] = 0
+        vDSP_zvabs(&split, 1, magnitudes, 1, vDSP_Length(bins))
+
+        let upperHz = min(12_000, sampleRate * 0.5)
+        let ratio = upperHz / 60
+        for band in 0..<bandCount {
+            let lowHz = 60 * pow(ratio, Float(band) / Float(bandCount))
+            let highHz = 60 * pow(ratio, Float(band + 1) / Float(bandCount))
+            let lowBin = max(1, min(bins - 1, Int(lowHz * Float(fftSize) / sampleRate)))
+            let highBin = max(lowBin + 1, min(bins, Int(ceil(highHz * Float(fftSize) / sampleRate))))
+            var peak: Float = 0
+            vDSP_maxv(magnitudes + lowBin, 1, &peak, vDSP_Length(highBin - lowBin))
+            let amplitude = max(1e-8, peak * 2 / Float(fftSize))
+            let decibels = 20 * log10(amplitude)
+            nextBands[band] = max(0, min(1, (decibels + 80) / 80))
+        }
+
+        lock.lock()
+        bands.update(from: nextBands, count: bandCount)
+        lock.unlock()
+    }
+}
+
 /// Real-time safe STFT voice transformer.
 ///
 /// The design goal is to separate **what was said** from **who said it**:

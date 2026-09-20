@@ -65,6 +65,22 @@ struct AudioRegression {
         precondition(engine.eqBandGain(3) == 2)
         precondition(engine.eqBandGain(4) == 0)
         precondition(!engine.distortionActive)
-        print("PASS: DSP, 196 preset blend pairs, default EQ and distortion bypass")
+
+        let encoded = try! JSONEncoder().encode(ScramblerPreset.telephone.settings)
+        let decoded = try! JSONDecoder().decode(ScramblerSettings.self, from: encoded)
+        precondition(decoded == ScramblerPreset.telephone.settings, "Saved settings did not round-trip")
+
+        let analyzer = SpectrumAnalyzer(sampleRate: 48_000)
+        let analyzerInput: [Float] = (0..<4096).map { n in
+            0.25 * sin(2 * .pi * 1_000 * Float(n) / 48_000)
+        }
+        analyzerInput.withUnsafeBufferPointer { input in
+            analyzer.process(input.baseAddress!, count: input.count)
+        }
+        let spectrum = analyzer.snapshot()
+        precondition(spectrum.count == 96 && spectrum.max()! > 0.5,
+                     "Spectrum analyser did not produce visible bands")
+
+        print("PASS: DSP, 196 preset blend pairs, settings persistence, spectrum analyser, default EQ and distortion bypass")
     }
 }

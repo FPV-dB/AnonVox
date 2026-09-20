@@ -75,6 +75,15 @@ and matched inside the chain, so nothing sounds better merely by being louder.
 **Randomize** picks a fresh disguise inside intelligible ranges and **Reset**
 restores defaults; editing any slider switches the label to "Custom".
 
+Use **Save** to store the complete current sound under a name. Saved sounds
+appear above the built-in presets, can be updated by saving with the same name,
+and can be removed from the trash menu. The most recent settings also restore
+automatically when the app is reopened.
+
+While processing is running, a waterfall spectrum shows the final processed
+signal after EQ, effects and compression. Frequency runs from 60 Hz to 12 kHz
+left to right, time moves downward, and the newest slice is at the bottom.
+
 **Blend** mixes two presets. Continuous parameters interpolate; discrete ones
 (LFO shape, distortion character, reverb space, stage count, switches) snap to
 whichever side the slider favours, since averaging them is meaningless. The

@@ -14,7 +14,7 @@ enum RecordingFormat: String, CaseIterable, Identifiable {
 
 /// What the speakers are fed. `off` silences them without touching the
 /// processing chain, so recording carries on regardless.
-enum MonitorSource: String, CaseIterable, Identifiable {
+enum MonitorSource: String, CaseIterable, Identifiable, Codable {
     case off = "Off"
     case original = "Original"
     case processed = "Processed"
@@ -26,7 +26,7 @@ enum MonitorSource: String, CaseIterable, Identifiable {
 }
 
 /// Shape of the low-frequency oscillator that wobbles the pitch.
-enum LFOWaveform: String, CaseIterable, Identifiable {
+enum LFOWaveform: String, CaseIterable, Identifiable, Codable {
     case sine = "Sine"
     case triangle = "Triangle"
     case square = "Square"
@@ -36,7 +36,7 @@ enum LFOWaveform: String, CaseIterable, Identifiable {
 }
 
 /// Distortion flavours, drawn from the factory presets on `AVAudioUnitDistortion`.
-enum DistortionCharacter: String, CaseIterable, Identifiable {
+enum DistortionCharacter: String, CaseIterable, Identifiable, Codable {
     case radioTower = "Radio Tower"
     case cosmic = "Cosmic"
     case goldenPi = "Golden Pi"
@@ -59,7 +59,7 @@ enum DistortionCharacter: String, CaseIterable, Identifiable {
 }
 
 /// Reverb spaces, drawn from the factory presets on `AVAudioUnitReverb`.
-enum ReverbSpace: String, CaseIterable, Identifiable {
+enum ReverbSpace: String, CaseIterable, Identifiable, Codable {
     case smallRoom = "Small Room"
     case mediumRoom = "Medium Room"
     case largeHall = "Large Hall"
@@ -81,7 +81,7 @@ enum ReverbSpace: String, CaseIterable, Identifiable {
 
 /// Every tunable value in one place, so presets and "reset to defaults" are
 /// just a matter of handing the engine a different instance.
-struct ScramblerSettings: Equatable {
+struct ScramblerSettings: Equatable, Codable {
     var basePitchCents: Float = -200
     var scrambleDepthCents: Float = 60
     var scrambleRateHz: Double = 0.8
@@ -142,6 +142,12 @@ struct ScramblerSettings: Equatable {
     var mudFrequency: Float = 300
     /// Output trim in dB, used to level-match presets.
     var outputTrim: Float = 0
+}
+
+struct SavedScramblerSettings: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var settings: ScramblerSettings
 }
 
 extension ScramblerSettings {
@@ -498,6 +504,7 @@ final class VoiceScramblerEngine: ObservableObject {
     private var meterClipped = false
     private var meterDSPLoad: Float = 0
     private var meterTimer: Timer?
+    private var spectrumAnalyzer: SpectrumAnalyzer?
 
     private var tapFormat: AVAudioFormat?
     /// Mono format the captured audio is reduced to before processing.
@@ -766,6 +773,7 @@ final class VoiceScramblerEngine: ObservableObject {
     @Published private(set) var isClipping = false
     @Published private(set) var dspLoad: Float = 0
     @Published private(set) var latencyMilliseconds: Double = 0
+    @Published private(set) var spectrumHistory: [[Float]] = []
 
     // MARK: Monitoring
 
@@ -774,9 +782,15 @@ final class VoiceScramblerEngine: ObservableObject {
     }
 
     @Published private(set) var activePreset: ScramblerPreset? = nil
+    @Published private(set) var savedSettings: [SavedScramblerSettings] = []
+    @Published private(set) var activeSavedSettingID: UUID?
+
+    private static let savedSettingsKey = "savedScramblerSettings.v1"
+    private static let lastSettingsKey = "lastScramblerSettings.v1"
 
     init() {
         configureEffects()
+        restorePersistedSettings()
     }
 
     /// Runs a property's side effect unless we're mid-`apply(_:)`, which does
@@ -787,7 +801,9 @@ final class VoiceScramblerEngine: ObservableObject {
         cachedSpectralParameters = currentSpectralParameters()
         cachedPhaserParameters = currentPhaserParameters()
         activePreset = nil
+        activeSavedSettingID = nil
         blendPair = nil
+        persistCurrentSettings()
     }
 
     // MARK: - Settings, presets, reset
@@ -886,12 +902,68 @@ final class VoiceScramblerEngine: ObservableObject {
         applyBypass()
         cachedSpectralParameters = currentSpectralParameters()
         cachedPhaserParameters = currentPhaserParameters()
+        persistCurrentSettings()
     }
 
     func load(_ preset: ScramblerPreset) {
         apply(preset.settings)
         activePreset = preset
+        activeSavedSettingID = nil
         blendPair = nil
+    }
+
+    func saveCurrentSettings(named rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        if let index = savedSettings.firstIndex(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) {
+            savedSettings[index].settings = settings
+            activeSavedSettingID = savedSettings[index].id
+        } else {
+            let saved = SavedScramblerSettings(id: UUID(), name: name, settings: settings)
+            savedSettings.append(saved)
+            savedSettings.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            activeSavedSettingID = saved.id
+        }
+        persistSavedSettings()
+    }
+
+    func loadSavedSettings(_ saved: SavedScramblerSettings) {
+        apply(saved.settings)
+        activePreset = nil
+        blendPair = nil
+        activeSavedSettingID = saved.id
+    }
+
+    func deleteSavedSettings(_ saved: SavedScramblerSettings) {
+        savedSettings.removeAll { $0.id == saved.id }
+        if activeSavedSettingID == saved.id { activeSavedSettingID = nil }
+        persistSavedSettings()
+    }
+
+    private func restorePersistedSettings() {
+        let defaults = UserDefaults.standard
+        let decoder = JSONDecoder()
+        if let data = defaults.data(forKey: Self.savedSettingsKey),
+           let decoded = try? decoder.decode([SavedScramblerSettings].self, from: data) {
+            savedSettings = decoded
+        }
+        if let data = defaults.data(forKey: Self.lastSettingsKey),
+           let decoded = try? decoder.decode(ScramblerSettings.self, from: data) {
+            apply(decoded)
+        }
+    }
+
+    private func persistSavedSettings() {
+        guard let data = try? JSONEncoder().encode(savedSettings) else { return }
+        UserDefaults.standard.set(data, forKey: Self.savedSettingsKey)
+    }
+
+    private func persistCurrentSettings() {
+        guard !isApplyingSettings,
+              let data = try? JSONEncoder().encode(settings) else { return }
+        UserDefaults.standard.set(data, forKey: Self.lastSettingsKey)
     }
 
     // MARK: Blending
@@ -1207,6 +1279,8 @@ final class VoiceScramblerEngine: ObservableObject {
 
         let stftLatency = Double(spectralProcessors.first?.latencyInSamples ?? 0)
         latencyMilliseconds = (stftLatency / format.sampleRate) * 1000
+        spectrumAnalyzer = SpectrumAnalyzer(sampleRate: Float(format.sampleRate))
+        spectrumHistory = []
 
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
@@ -1225,6 +1299,7 @@ final class VoiceScramblerEngine: ObservableObject {
             }
             self.meterOutputPeak = peak
             if peak >= 0.999 { self.meterClipped = true }
+            self.spectrumAnalyzer?.process(channels[0], count: Int(buffer.frameLength))
             self.writeToRecording(buffer)
         }
 
@@ -1288,6 +1363,8 @@ final class VoiceScramblerEngine: ObservableObject {
         teardownGraph()
         spectralProcessors.removeAll()
         phasers.removeAll()
+        spectrumAnalyzer = nil
+        spectrumHistory = []
 
         isRunning = false
     }
@@ -1367,6 +1444,12 @@ final class VoiceScramblerEngine: ObservableObject {
             self.inputLevel = max(self.meterInputPeak, self.inputLevel * 0.75)
             self.outputLevel = max(self.meterOutputPeak, self.outputLevel * 0.75)
             self.dspLoad = self.meterDSPLoad
+            if let spectrum = self.spectrumAnalyzer?.snapshot() {
+                self.spectrumHistory.append(spectrum)
+                if self.spectrumHistory.count > 72 {
+                    self.spectrumHistory.removeFirst(self.spectrumHistory.count - 72)
+                }
+            }
             if self.meterClipped {
                 self.isClipping = true
                 self.meterClipped = false
