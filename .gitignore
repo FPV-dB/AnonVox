@@ -1,0 +1,18 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Generated app and standalone executable
+/build/
+/VoiceScrambler
+
+# Xcode local state and build products
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcactivitylog
+*.dSYM/
+
+# Swift Package Manager
+.build/
+.swiftpm/

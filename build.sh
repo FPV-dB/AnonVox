@@ -24,7 +24,7 @@ pkill -f "AnonVox.app/Contents/MacOS/AnonVox" 2>/dev/null || true
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp build/Info.plist "$APP/Contents/Info.plist"
+cp Info.plist "$APP/Contents/Info.plist"
 [[ -f AppIcon.icns ]] && cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # -swift-version 5: this code is not written for Swift 6 language mode, which
