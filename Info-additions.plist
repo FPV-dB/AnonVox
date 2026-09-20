@@ -1,0 +1,7 @@
+<!--
+  Xcode's macOS App template generates its own Info.plist automatically.
+  Just add this one key to it (Xcode target > Info tab > "+", or paste into
+  the raw plist source) — it's the only addition this project needs.
+-->
+<key>NSMicrophoneUsageDescription</key>
+<string>Voice Scrambler needs microphone access to process and scramble your voice in real time.</string>

@@ -1,0 +1,180 @@
+# Voice Scrambler (macOS, Swift + SwiftUI + AVAudioEngine)
+
+A small real-time voice scrambler: it captures your mic, wobbles the pitch
+up and down on an LFO, adds a gritty distortion/EQ pass, and plays the
+result out live. Four sliders control base pitch, wobble depth, wobble
+speed, and distortion mix.
+
+## How it works
+
+The design treats **intelligibility** and **anonymity** as two separate
+objectives rather than piling effects on top of each other. Speaker identity
+lives mostly in the spectral *envelope* (vocal tract shape) and the *excitation*
+(glottal source); the words live in timing, syllable boundaries and consonant
+transients. So the chain modifies the former and leaves the latter alone.
+
+```
+mic → tap → SpectralVoiceProcessor (STFT: formant warp, band warp,
+                                    excitation replacement, slow drift, clarity)
+    → AVAudioPlayerNode
+    → AVAudioUnitTimePitch      (pitch only; formant side-effect cancelled)
+    → AVAudioUnitEQ (5 band: low cut, mud cut, low shelf, presence, high shelf)
+    → distortion → delay → reverb  (all default to off)
+    → dynamics processor → main mixer → output
+```
+
+`SpectralVoiceProcessor` (`VoiceDSP.swift`) is a 1024-point STFT with 75%
+overlap and a square-root Hann window, built on Accelerate/vDSP. It estimates
+the spectral envelope, warps it along the frequency axis, and recombines it with
+the unwarped fine structure — which moves the formants while leaving pitch
+untouched. Measured behaviour:
+
+- neutral round-trip error **−97.8 dB** relative to signal
+- pitch held at exactly 120 Hz while formants move
+- **0.8%** of real time CPU, **23.2 ms** added latency at 48 kHz
+- `process()` performs no allocation, locking, file I/O or logging
+
+Because `AVAudioUnitTimePitch` moves formants along with pitch, the requested
+formant shift is divided by the pitch ratio before being handed to the STFT
+stage. The two cancel, giving genuinely independent pitch and formant controls.
+
+### Why the old chain sounded muddy
+
+1. The LFO defaulted to ±900 cents at 5 Hz — a full 18-semitone excursion every
+   200 ms, against a syllable length of 150–250 ms. Formant trajectories are the
+   main vowel cue and this destroyed them. Now ±60 cents at 0.8 Hz.
+2. `AVAudioUnitTimePitch` is not formant-preserving, so −500 cents dragged the
+   whole envelope down 25%. Now the formant shift is an explicit, independent
+   control and the default pitch move is −200 cents.
+3. Nothing addressed 200–400 Hz, exactly where a downshifted voice piles up.
+   There is now a dedicated mud-cut band, on by default.
+4. Distortion was on by default at 20% with a band-limited preset. Now Clean.
+5. There was no metering or gain staging at all. There are now input/output
+   meters, a clip indicator, DSP load, latency readout, and measured per-preset
+   level matching applied inside the chain so it affects recordings too.
+
+### Two AVAudioEngine constraints this design works around
+
+Both abort the process with an uncaught Objective-C exception rather than
+returning an error:
+
+1. **A time effect cannot sit downstream of the live input node.** Wiring
+   `inputNode` into `AVAudioUnitTimePitch` aborts with `required condition is
+   false: false == isInputConnToConverter`. Inserting mixers does *not* help —
+   the check walks the whole input chain. Feeding the time effect from an
+   `AVAudioPlayerNode` is the supported workaround.
+2. **`AVAudioUnitReverb` is stereo-only.** On a mono bus it fails with
+   `kAudioUnitErr_FormatNotSupported` (-10868). A mixer converts mono to stereo
+   before the effects chain.
+
+## Controls
+
+A preset menu sits under the Start button with fourteen starting points,
+grouped by what they cost you in comprehension. Loudness is measured per preset
+and matched inside the chain, so nothing sounds better merely by being louder.
+**Randomize** picks a fresh disguise inside intelligible ranges and **Reset**
+restores defaults; editing any slider switches the label to "Custom".
+
+| Group | Preset | Mechanism |
+|---|---|---|
+| Clear | Clear Disguise | Formant shift, small pitch move (the default) |
+| Clear | Announcer | No wobble, hard compression, forward presence |
+| Clear | Lighter Voice | Shifts **upward** — the one direction the others don't |
+| Clear | Deep Anonymous | Lengthened tract plus a real pitch drop |
+| Clear | Neutral Anonymous | Aims for unremarkable rather than obviously processed |
+| Character | Telephone | 300 Hz–3.4 kHz band limit; strong timbre disguise, very readable |
+| Character | Radio Intelligence | Band-limited comms character |
+| Character | Breathy Stranger | 28% excitation replacement — breath, not whisper |
+| Character | Distant Room | Room reflections; texture over clarity |
+| Maximum | Spectral Mask | Band warping below the consonant region |
+| Maximum | Synthetic Voice | 45% excitation replacement |
+| Maximum | Whisper Mask | 85% excitation replacement; removes pitch identity |
+| Maximum | Unstable Identity | Slow drift so no stable voiceprint forms |
+| Maximum | Glitch Comms | Square-wave wobble and bit-crushed grit |
+
+- **Pitch** — base shift in cents (±1200 = one octave), wobble depth and
+  rate, and the LFO shape. Random is the hardest to follow by ear.
+- **EQ** — a 4-band `AVAudioUnitEQ`: a switchable high-pass low cut, a low
+  shelf at 120 Hz, a sweepable parametric mid, and a high shelf at 6 kHz,
+  each ±24 dB, plus a global bypass.
+- **Effects** — a **Drive** knob for distortion (six `AVAudioUnitDistortion`
+  factory presets for character; drive at 0 bypasses the unit, so there is no
+  separate "clean" setting and the knob is never disabled), a **phaser** with
+  Depth / Rate / Feedback knobs and a 2–8 stage selector, plus delay and reverb.
+  Delay, reverb and phaser all default to off. Knobs drag vertically and
+  double-click to reset.
+
+  The phaser is not a stock Audio Unit — Apple ships none — so it is
+  implemented in `VoiceDSP.swift` as a cascade of first-order all-pass sections
+  with an LFO on their break frequency, sweeping 180–1600 Hz. Coefficients
+  update at a 32-sample control rate. Verified: bit-exact bypass at depth 0,
+  notches sweeping (1488 Hz → 480 Hz over one second at 0.25 Hz), and stable
+  for 10 s at feedback 0.9 with 8 stages (peak 0.683, no clipping).
+- **Output** — a three-way monitor (**Off / Original / Processed**) and volume,
+  plus a compressor. The same control sits in the header with a ⌘M mute
+  shortcut. **Off** silences the speakers while processing and recording carry
+  on; **Original** bypasses the transform for A/B against your untreated voice. The compressor
+  is Apple's `kAudioUnitSubType_DynamicsProcessor`, which has no Swift
+  wrapper, so its parameters are set through `AudioUnitSetParameter`.
+  Turning the monitor **off** silences the speakers while recording
+  continues — the reliable way to avoid feedback without headphones.
+- **Record** — captures the fully processed output to
+  `~/Music/Voice Scrambler`. WAV is written natively; **MP3 requires the
+  `lame` encoder** (`brew install lame`), because Apple's frameworks can
+  decode MP3 but not encode it. If `lame` is missing the app keeps the WAV
+  and says so. The unprocessed voice is never written to disk.
+- **Help** — in-app guidance on staying anonymous while remaining
+  understandable, including an honest note on what this does *not* protect
+  against.
+
+## Setting it up in Xcode (5 minutes)
+
+1. Open Xcode → **File > New > Project** → macOS → **App**.
+   - Interface: **SwiftUI**
+   - Language: **Swift**
+   - Name it `VoiceScrambler` (or whatever you like).
+2. Xcode generates `VoiceScramblerApp.swift`, `ContentView.swift`, and
+   `Info.plist` automatically — **delete the generated
+   `VoiceScramblerApp.swift` and `ContentView.swift`** and drag in the
+   three `.swift` files from this folder instead (check "Copy items if
+   needed").
+3. Add the microphone permission key: select your target → **Info** tab →
+   click **+** → add `Privacy - Microphone Usage Description` (this is
+   `NSMicrophoneUsageDescription` under the hood) → set the value to
+   something like *"Voice Scrambler needs microphone access to process
+   your voice."* (See `Info-additions.plist` for the raw key/value.)
+4. Turn off the App Sandbox, or configure it for audio input:
+   - Select your target → **Signing & Capabilities**.
+   - If "App Sandbox" is present, either remove it (simplest, fine for a
+     personal/dev-signed build), or keep it and make sure **Audio Input**
+     is checked.
+5. Build and run (⌘R). The first time you hit Start, macOS will prompt
+   for microphone access — allow it.
+
+## Usage notes
+
+- **Wear headphones.** Without them, the speaker output will feed back
+  into the mic and howl/scream — this is normal for any live mic-through
+  setup, not a bug.
+- **Base pitch** shifts the whole voice up or down (in cents; ±1200 =
+  one octave).
+- **Scramble depth/rate** control how far and how fast the pitch wobbles
+  around that base — low rate + high depth gives a slow "warping" effect,
+  high rate + moderate depth gives a more jittery/robotic effect.
+- **Grit** blends in the distortion unit for a rougher, more disguised
+  texture.
+
+## Extending it
+
+A few natural next steps if you want to push it further:
+- Swap `.speechRadioTower` for another `AVAudioUnitDistortion` preset
+  (e.g. `.multiEcho1`, `.multiEcho2`) for a different character.
+- Add an `AVAudioUnitReverb` node in the chain for spatial texture.
+- Add a "randomize" button that jumps `basePitchCents` to a new random
+  value each time you press Start, so the disguise changes per session.
+- For routing into other apps (Zoom, Discord, etc.) rather than just
+  playing out loud, you'd need a virtual audio device (e.g. via
+  BlackHole or a custom Audio Server Plug-In) so this app's output can
+  be selected as another app's microphone input — that's a separate,
+  more involved project since it requires a system audio driver rather
+  than just an AVAudioEngine graph.
