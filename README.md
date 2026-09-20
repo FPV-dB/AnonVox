@@ -86,12 +86,10 @@ left to right, time moves downward, and the newest slice is at the bottom.
 
 ### Pro serials
 
-The title-bar **Unlock Pro** button accepts offline signed serials. A valid
-serial persists in user defaults and shows the licensed name; edited, damaged,
-or randomly generated strings are rejected. The app embeds only a Curve25519
-public key, so the public source can check licenses without being able to issue
-them. Pro status is intentionally a capability flag for future paid features;
-this revision does not remove or disable any existing audio controls.
+**Licensing is currently disabled and every feature is free for everyone.**
+The signed serial checker and generator remain in `LicenseManager.swift` and
+`Tools/GenerateProSerial.swift` as dormant reference code, but the checker is
+excluded from the app build and there is no activation UI or feature gate.
 
 Generate a customer serial with the separate signing tool:
 

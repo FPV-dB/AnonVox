@@ -149,32 +149,17 @@ struct WaterfallSpectrumView: View {
 
 struct ContentView: View {
     @StateObject private var engine = VoiceScramblerEngine()
-    @StateObject private var proLicense = ProLicenseManager()
     @State private var showResetConfirmation = false
     @State private var showBlend = false
     @State private var blendA: ScramblerPreset = .deepAnonymous
     @State private var blendB: ScramblerPreset = .telephone
     @State private var showSaveSettings = false
     @State private var savedSettingsName = ""
-    @State private var showLicense = false
-    @State private var serialNumber = ""
 
     var body: some View {
         VStack(spacing: 14) {
-            HStack(spacing: 8) {
-                Text("Voice Scrambler")
-                    .font(.title2).bold()
-                Button {
-                    showLicense = true
-                } label: {
-                    Label(proLicense.isProUnlocked ? "Pro" : "Unlock Pro",
-                          systemImage: proLicense.isProUnlocked ? "checkmark.seal.fill" : "lock.fill")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.bordered)
-                .tint(proLicense.isProUnlocked ? .purple : .secondary)
-                .help(proLicense.isProUnlocked ? "Pro mode is unlocked" : "Enter a serial number")
-            }
+            Text("Voice Scrambler")
+                .font(.title2).bold()
 
             HStack(spacing: 10) {
                 Button(action: toggle) {
@@ -257,65 +242,6 @@ struct ContentView: View {
         } message: {
             Text("Saving with an existing name updates that saved setting.")
         }
-        .sheet(isPresented: $showLicense) {
-            proLicenseSheet
-        }
-    }
-
-    private var proLicenseSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: proLicense.isProUnlocked ? "checkmark.seal.fill" : "lock.shield")
-                    .font(.system(size: 32))
-                    .foregroundStyle(proLicense.isProUnlocked ? .purple : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(proLicense.isProUnlocked ? "AnonVox Pro" : "Unlock AnonVox Pro")
-                        .font(.title2.bold())
-                    if let license = proLicense.license {
-                        Text("Licensed to \(license.name)")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Enter the complete serial number supplied with your license.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            if !proLicense.isProUnlocked {
-                TextField("ANVX1…", text: $serialNumber)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .onSubmit { _ = proLicense.activate(serial: serialNumber) }
-            }
-
-            if let message = proLicense.validationMessage {
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(proLicense.isProUnlocked ? .green : .red)
-            }
-
-            HStack {
-                if proLicense.isProUnlocked {
-                    Button("Remove License", role: .destructive) {
-                        proLicense.deactivate()
-                        serialNumber = ""
-                    }
-                }
-                Spacer()
-                Button("Close") { showLicense = false }
-                    .keyboardShortcut(.cancelAction)
-                if !proLicense.isProUnlocked {
-                    Button("Unlock Pro") {
-                        if proLicense.activate(serial: serialNumber) { serialNumber = "" }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(serialNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .keyboardShortcut(.defaultAction)
-                }
-            }
-        }
-        .padding(24)
-        .frame(width: 520)
     }
 
     // MARK: - Presets / reset

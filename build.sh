@@ -12,7 +12,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="build/AnonVox.app"
-SOURCES=(VoiceScramblerApp.swift ContentView.swift VoiceScramblerEngine.swift VoiceDSP.swift AudioDevices.swift LicenseManager.swift)
+# Pro licensing is disabled: every feature is available to everyone.
+# To restore the dormant signed-license implementation, add LicenseManager.swift
+# here and restore its UI in ContentView.swift.
+SOURCES=(VoiceScramblerApp.swift ContentView.swift VoiceScramblerEngine.swift VoiceDSP.swift AudioDevices.swift)
 
 if [[ "${1:-}" == "--icon" ]]; then
     xcrun swift make-icon.swift
