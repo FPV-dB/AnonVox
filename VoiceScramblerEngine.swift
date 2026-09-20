@@ -89,11 +89,11 @@ struct ScramblerSettings: Equatable {
 
     var eqEnabled = true
     var lowCutEnabled = true
-    var lowCutFrequency: Float = 90
+    var lowCutFrequency: Float = 100
     var eqLowGain: Float = 0
-    var eqMidGain: Float = 4
+    var eqMidGain: Float = 2
     var eqMidFrequency: Float = 2400
-    var eqHighGain: Float = -2
+    var eqHighGain: Float = 0
     var eqHighFrequency: Float = 6000
 
     var distortionCharacter: DistortionCharacter = .radioTower
@@ -114,7 +114,7 @@ struct ScramblerSettings: Equatable {
 
     var compressorEnabled = true
     var compressorThreshold: Float = -20
-    var compressorMakeupGain: Float = 4
+    var compressorMakeupGain: Float = 2
 
     var monitorVolume: Float = 100
 
@@ -1193,7 +1193,7 @@ final class VoiceScramblerEngine: ObservableObject {
             SpectralVoiceProcessor(sampleRate: Float(format.sampleRate),
                                    fftSize: 1024,
                                    overlap: 4,
-                                   envelopeWidthHz: 180)
+                                   envelopeWidthHz: 300)
         }
 
         configureEffects()
@@ -1211,6 +1211,21 @@ final class VoiceScramblerEngine: ObservableObject {
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             self?.enqueue(buffer)
+        }
+
+        // Share the final tap between metering and recording; recording
+        // start/stop must not remove the output meter.
+        outputTapNode.installTap(onBus: 0, bufferSize: 1024, format: processing) { [weak self] buffer, _ in
+            guard let self, let channels = buffer.floatChannelData else { return }
+            var peak: Float = 0
+            for channel in 0..<Int(buffer.format.channelCount) {
+                var channelPeak: Float = 0
+                vDSP_maxmgv(channels[channel], 1, &channelPeak, vDSP_Length(buffer.frameLength))
+                peak = max(peak, channelPeak)
+            }
+            self.meterOutputPeak = peak
+            if peak >= 0.999 { self.meterClipped = true }
+            self.writeToRecording(buffer)
         }
 
         engine.prepare()
@@ -1311,14 +1326,9 @@ final class VoiceScramblerEngine: ObservableObject {
             phaser.process(out, count: frames, parameters: phaserParameters)
         }
 
-        vDSP_maxmgv(out, 1, &peak, vDSP_Length(frames))
-        let outputPeak = peak
-
         // Plain stores, read by a timer on the main thread. No allocation, no
         // locking and no publishing from the audio thread.
         meterInputPeak = inputPeak
-        meterOutputPeak = outputPeak
-        if outputPeak >= 0.999 { meterClipped = true }
         let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
         let bufferDuration = Double(frames) / capture.sampleRate
         if bufferDuration > 0 {
@@ -1331,6 +1341,7 @@ final class VoiceScramblerEngine: ObservableObject {
     /// Unwinds everything added in `start()` so a later start rebuilds cleanly.
     private func teardownGraph() {
         engine.inputNode.removeTap(onBus: 0)
+        outputTapNode.removeTap(onBus: 0)
         tapFormat = nil
         captureFormat = nil
 
@@ -1465,10 +1476,6 @@ final class VoiceScramblerEngine: ObservableObject {
         }
 
         recordingWAVURL = wavURL
-        outputTapNode.removeTap(onBus: 0)
-        outputTapNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            self?.writeToRecording(buffer)
-        }
 
         recordingStart = Date()
         recordingDuration = 0
@@ -1485,7 +1492,6 @@ final class VoiceScramblerEngine: ObservableObject {
     func stopRecording() {
         guard isRecording else { return }
 
-        outputTapNode.removeTap(onBus: 0)
         recordingTimer?.invalidate()
         recordingTimer = nil
         recordingStart = nil

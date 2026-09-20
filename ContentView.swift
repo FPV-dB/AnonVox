@@ -412,7 +412,7 @@ struct ContentView: View {
                                range: 150...600,
                                step: 10,
                                caption: "\(Int(engine.mudFrequency)) Hz")
-                Text("Clarity lifts 2–5 kHz inside the spectral stage and is never scaled by Strength, so it can restore consonants without restoring your vocal identity. Mud cut removes the 200–400 Hz pile-up that downward pitch shifting creates.")
+                Text("Clarity lifts 2–5 kHz inside the spectral stage and is never scaled by Strength, to emphasize surviving consonant detail. It cannot recover detail lost during capture or guarantee anonymity. Mud cut removes the 200–400 Hz pile-up that downward pitch shifting creates.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
 
@@ -800,7 +800,7 @@ struct ContentView: View {
 
                 helpSection("Strength and Clarity are separate on purpose", bullets: [
                     "**Strength** scales every identity change at once. At 0 the transform is fully neutral.",
-                    "**Clarity** lifts 2–5 kHz inside the spectral stage and is never scaled by Strength. That is what lets full strength stay intelligible — it restores consonant information without restoring your identity.",
+                    "**Clarity** lifts 2–5 kHz inside the spectral stage and is never scaled by Strength. It emphasizes surviving consonant detail, but heavy transformations can still obscure words; this is not a guarantee of anonymity.",
                     "Use the **Original / Processed** switch at the top to A/B the same phrase without stopping the engine. Preset loudness is measured and matched, so nothing sounds better merely by being louder."
                 ])
 

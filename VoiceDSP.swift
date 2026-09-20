@@ -248,13 +248,23 @@ final class SpectralVoiceProcessor {
             vDSP_vsmul(logMagnitude, 1, &keep, logMagnitude, 1, vDSP_Length(bins))
         }
 
+        // Bound envelope correction to ±12 dB. Dividing by a deep spectral
+        // trough previously produced arbitrarily large gains, accentuating
+        // individual harmonics/noise instead of a smooth vocal-tract change.
+        // Keep the residual/phase transform; this adds no original-voice mix.
+        let maxCorrection: Float = log(10) * 12 / 20
+        for k in 0..<bins {
+            let correction = max(-maxCorrection, min(maxCorrection, warpedEnvelope[k] - envelope[k]))
+            warpedEnvelope[k] = envelope[k] + correction
+        }
+
         // recombine and leave the log domain
         vDSP_vadd(warpedEnvelope, 1, logMagnitude, 1, scratch, 1, vDSP_Length(bins))
         vvexpf(magnitude, scratch, &n32)
 
         // --- clarity: lift the consonant band ---
         if p.clarity > 0 {
-            let boost = p.clarity * 0.9 // up to roughly +8 dB
+            let boost = p.clarity * 0.9 // up to +5.6 dB (20 log10(1.9))
             for k in 0..<bins {
                 magnitude[k] *= 1 + boost * clarityCurve[k]
             }

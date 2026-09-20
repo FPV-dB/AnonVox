@@ -104,7 +104,7 @@ usual `a + (b - a)·t` does not return exactly `b` at t = 1, so the blend uses
 
 - **Pitch** — base shift in cents (±1200 = one octave), wobble depth and
   rate, and the LFO shape. Random is the hardest to follow by ear.
-- **EQ** — a 4-band `AVAudioUnitEQ`: a switchable high-pass low cut, a low
+- **EQ** — a 5-band `AVAudioUnitEQ`: a switchable high-pass low cut, a dedicated mud cut, a low
   shelf at 120 Hz, a sweepable parametric mid, and a high shelf at 6 kHz,
   each ±24 dB, plus a global bypass.
 - **Effects** — a **Drive** knob for distortion (six `AVAudioUnitDistortion`
@@ -235,3 +235,51 @@ A few natural next steps if you want to push it further:
   be selected as another app's microphone input — that's a separate,
   more involved project since it requires a system audio driver rather
   than just an AVAudioEngine graph.
+
+## September 2026 clarity revision
+
+Build with `bash build.sh --no-run`; run repeatable checks with `bash test.sh`.
+`Info.plist` is source configuration in the repository root. `build/`, the
+standalone `VoiceScrambler` executable, and macOS/Xcode local metadata are
+ignored. Icons remain tracked. Existing Git history is retained.
+
+The live path is channel 0 → STFT → optional phaser → mono/stereo mixer →
+pitch → five-band EQ → distortion → delay → reverb → compression → monitor.
+The final compressor output supplies both recording and metering, before
+monitor volume/mute. Original monitor mode bypasses processing and therefore
+also changes what a concurrent recording captures; use Processed or Off when
+recording a disguised voice.
+
+Changes in this revision:
+
+- Bound the formant envelope correction to ±12 dB per bin. Previously a
+  warped envelope divided by a quiet spectral trough could produce unbounded
+  gain. The bound limits that coloration without adding an untreated voice
+  signal to the processed path. Extreme formant settings may sound milder.
+- Increase the live envelope smoothing width from 180 to 300 Hz to reduce
+  harmonic-scale coloration. Pitch, formant, band-warp, whisper and modulation
+  controls remain available. This is still an approximate envelope estimator.
+- Default high-pass: 90 → 100 Hz; presence EQ: +4 → +2 dB at 2.4 kHz;
+  high shelf: −2 → 0 dB at 6 kHz; compressor makeup: +4 → +2 dB.
+  Keep the existing −6.3 dB mud cut at 300 Hz and 40% spectral clarity.
+  These defaults preserve consonant bandwidth and reduce stacked gain.
+  Presets inherit these changes unless they explicitly override a field.
+- Meter the final processed stereo signal instead of the pre-EQ mono buffer.
+  Recording start/stop now shares that tap without disconnecting metering.
+- Correct the clarity gain comment: its maximum amplitude multiplier of 1.9
+  is +5.6 dB, not +8 dB. Clarify the UI wording about recovery and anonymity.
+
+The earlier README's measured loudness/CPU and perceptual claims describe
+prior work, not validation of this revision. Existing preset trims have not
+been recalibrated for these changes. Strong whisper replacement, square/random
+pitch modulation, phaser notches, distortion and wet delay/reverb can still
+reduce intelligibility. Bluetooth capture bandwidth and unusually loud input
+can also dominate the result; no filter can recover missing consonants.
+
+Automated checks cover neutral STFT reconstruction, finite transformed output,
+chunk-size independence at 24/44.1/48 kHz, all 196 preset-blend endpoint pairs,
+and configured default EQ/distortion bypass. They use synthetic signals;
+they do not measure word recognition, speaker anonymity, microphone routing,
+or live recording behavior. Listening with representative speech remains
+necessary. The output clip indicator now observes downstream boosts, but the
+compressor is not a guaranteed brick-wall limiter.
