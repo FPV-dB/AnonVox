@@ -75,6 +75,16 @@ and matched inside the chain, so nothing sounds better merely by being louder.
 **Randomize** picks a fresh disguise inside intelligible ranges and **Reset**
 restores defaults; editing any slider switches the label to "Custom".
 
+**Blend** mixes two presets. Continuous parameters interpolate; discrete ones
+(LFO shape, distortion character, reverb space, stage count, switches) snap to
+whichever side the slider favours, since averaging them is meaningless. The
+blend is driven from key-path lists in `ScramblerSettings`, with a test
+asserting that amount 0 reproduces the left preset exactly and amount 1 the
+right — across all 196 ordered pairs. That endpoint check is what catches a
+field omitted from the lists, and it also caught a floating-point issue: the
+usual `a + (b - a)·t` does not return exactly `b` at t = 1, so the blend uses
+`(1 - t)·a + t·b` instead.
+
 | Group | Preset | Mechanism |
 |---|---|---|
 | Clear | Clear Disguise | Formant shift, small pitch move (the default) |
@@ -126,6 +136,53 @@ restores defaults; editing any slider switches the label to "Custom".
 - **Help** — in-app guidance on staying anonymous while remaining
   understandable, including an honest note on what this does *not* protect
   against.
+
+## Routing into Zoom, Discord or OBS
+
+macOS will not let one app's output become another app's microphone, so a
+virtual audio device has to sit in between. There is a second constraint that
+shapes the whole setup: **AVAudioEngine drives input and output from a single
+HAL unit**, so the app cannot take audio from your mic and send it to a
+different device. Verified rather than assumed — setting input and output to
+two different devices fails with `kAudioUnitErr_InvalidPropertyValue` (-10851),
+and setting only the input leaves the output format at 0 Hz with the engine
+refusing to run.
+
+The way around both is an aggregate device:
+
+1. `brew install blackhole-2ch`. If it doesn't show up afterwards, run
+   `sudo killall coreaudiod` — CoreAudio only scans for HAL drivers at launch,
+   so a daemon older than the install will never see it.
+2. In Voice Scrambler, **Output → Create routing device**. That builds the
+   aggregate (microphone + BlackHole, mic as clock master) and selects it.
+   Audio MIDI Setup is not required; **Remove** deletes it again.
+3. In Zoom / Discord / OBS, choose **BlackHole 2ch** as the microphone.
+
+Verified end to end on a MacBook Air mic plus BlackHole 2ch: the aggregate
+enumerates as 3 in / 2 out at 48 kHz, the engine runs on it at 21.3 ms added
+latency and 0.9% CPU, and a separate process listening on BlackHole's input
+goes from 0.00000 to 0.078 peak once the scrambler starts.
+
+The aggregate presents the microphone on input channel 0 and BlackHole's
+loopback on channels 1–2 — which is this app's own output. **The engine
+captures channel 0 only**; capturing all of them would feed the output
+straight back in. Measured stable across successive windows, no runaway.
+
+Resulting chain: `mic → aggregate → Voice Scrambler → BlackHole → other app`.
+
+Notes:
+
+- **Latency.** The spectral stage adds one FFT frame — 21 ms at 48 kHz, 43 ms
+  at 24 kHz — and the tap-plus-player buffering roughly doubles it. Fine for a
+  call, too much for anything needing tight sync.
+- **Avoid Bluetooth hands-free mics.** In call mode AirPods run at 24 kHz mono
+  with little usable content above 4 kHz, which throws away the consonant
+  energy Clarity exists to protect. The app flags this with a narrow-band
+  warning next to the device picker. A built-in or wired mic at 48 kHz is a
+  large, free quality win.
+- Some virtual devices accept configuration and then refuse to start, or
+  renegotiate their format when idle. The app detects a device that starts
+  without actually running, falls back to the system default, and says so.
 
 ## Setting it up in Xcode (5 minutes)
 

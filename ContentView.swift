@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreAudio
 
 
 /// A rotary control. Drag vertically to turn it; double-click to return it to
@@ -84,6 +85,9 @@ struct Knob: View {
 struct ContentView: View {
     @StateObject private var engine = VoiceScramblerEngine()
     @State private var showResetConfirmation = false
+    @State private var showBlend = false
+    @State private var blendA: ScramblerPreset = .deepAnonymous
+    @State private var blendB: ScramblerPreset = .telephone
 
     var body: some View {
         VStack(spacing: 14) {
@@ -170,8 +174,7 @@ struct ContentView: View {
                         }
                     }
                 } label: {
-                    Label(engine.activePreset?.rawValue ?? "Custom",
-                          systemImage: "slider.horizontal.3")
+                    Label(presetLabel, systemImage: "slider.horizontal.3")
                 }
                 .frame(maxWidth: 220)
 
@@ -182,12 +185,26 @@ struct ContentView: View {
                 }
                 .help("Pick a fresh disguise, kept within intelligible ranges")
 
+                Button {
+                    showBlend.toggle()
+                    if showBlend && engine.blendPair == nil {
+                        engine.setBlend(blendA, blendB)
+                    }
+                } label: {
+                    Label("Blend", systemImage: "arrow.triangle.merge")
+                }
+                .help("Mix two presets together")
+
                 Button(role: .destructive) {
                     showResetConfirmation = true
                 } label: {
                     Label("Reset", systemImage: "arrow.counterclockwise")
                 }
                 .help("Restore all sound settings to defaults")
+            }
+
+            if showBlend {
+                blendRow
             }
 
             Picker("Monitor", selection: $engine.monitorSource) {
@@ -197,12 +214,70 @@ struct ContentView: View {
             .frame(maxWidth: 320)
             .help("Off silences the speakers; Original/Processed A/B the untreated mic against the transform")
 
-            Text(engine.activePreset?.detail ?? "Your own mix of settings.")
+            Text(engine.blendPair.map { "\($0.a.rawValue) blended with \($0.b.rawValue)." }
+                 ?? engine.activePreset?.detail
+                 ?? "Your own mix of settings.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
         }
+    }
+
+    private var presetLabel: String {
+        if let pair = engine.blendPair {
+            return "\(pair.a.rawValue) × \(pair.b.rawValue)"
+        }
+        return engine.activePreset?.rawValue ?? "Custom"
+    }
+
+    /// Two presets and a crossfade between them. Continuous values interpolate;
+    /// discrete ones snap to whichever side the slider favours.
+    private var blendRow: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                presetPicker(selection: $blendA)
+                Image(systemName: "plus.circle.fill").foregroundStyle(.secondary)
+                presetPicker(selection: $blendB)
+                Button {
+                    showBlend = false
+                    engine.clearBlend()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("Stop blending and keep the nearer preset")
+            }
+
+            HStack(spacing: 10) {
+                Text(blendA.rawValue).font(.caption2).foregroundStyle(.secondary)
+                Slider(value: $engine.blendAmount, in: 0...100, step: 1)
+                Text(blendB.rawValue).font(.caption2).foregroundStyle(.secondary)
+                Text("\(Int(engine.blendAmount))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func presetPicker(selection: Binding<ScramblerPreset>) -> some View {
+        Menu {
+            ForEach(ScramblerPreset.Category.allCases, id: \.self) { category in
+                Section(category.rawValue) {
+                    ForEach(ScramblerPreset.allCases.filter { $0.category == category }) { preset in
+                        Button(preset.rawValue) {
+                            selection.wrappedValue = preset
+                            engine.setBlend(blendA, blendB)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(selection.wrappedValue.rawValue).font(.caption)
+        }
+        .frame(maxWidth: 170)
     }
 
     // MARK: - Identity
@@ -504,6 +579,74 @@ struct ContentView: View {
 
     private var outputTab: some View {
         Form {
+            Section("Audio device") {
+                Picker("Device", selection: $engine.selectedDeviceID) {
+                    Text("System default").tag(AudioDeviceID?.none)
+                    ForEach(engine.selectableDevices) { device in
+                        Text(device.name).tag(AudioDeviceID?.some(device.id))
+                    }
+                }
+
+                if let device = engine.selectedDevice {
+                    Text(device.summary + (device.isAggregate ? " · aggregate" : ""))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                if engine.activeSampleRate > 0 {
+                    LabeledContent("Running at") {
+                        Text("\(Int(engine.activeSampleRate)) Hz")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(engine.activeSampleRate < 32000 ? .orange : .secondary)
+                    }
+                }
+
+                if engine.activeSampleRate > 0 && engine.activeSampleRate < 32000 {
+                    Label("Narrow-band link (Bluetooth hands-free). Most consonant energy above 4 kHz is already gone before processing — switch to a wired or built-in mic for a real improvement.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        engine.refreshDevices()
+                    } label: {
+                        Label("Refresh list", systemImage: "arrow.clockwise")
+                    }
+
+                    if let routing = engine.routingDevice {
+                        Button {
+                            engine.selectedDeviceID = routing.id
+                        } label: {
+                            Label("Use routing device", systemImage: "arrow.triangle.branch")
+                        }
+                        .disabled(engine.selectedDeviceID == routing.id)
+
+                        Button(role: .destructive) {
+                            engine.removeRoutingDevice()
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    } else if let loopback = engine.loopbackDevice {
+                        Button {
+                            engine.createRoutingDevice()
+                        } label: {
+                            Label("Create routing device", systemImage: "wand.and.stars")
+                        }
+                        .help("Builds an aggregate of your microphone and \(loopback.name), then selects it")
+                    }
+                }
+                .font(.caption)
+
+                if let loopback = engine.loopbackDevice {
+                    Text("\(loopback.name) is installed. **Create routing device** builds an aggregate of your microphone and \(loopback.name) and selects it — then choose **\(loopback.name)** as the microphone in Zoom, Discord or OBS. Only the microphone channel is captured, so the app never re-ingests its own output.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    Text("Only devices with **both** input and output are listed: AVAudioEngine drives both directions from one device, and pairing two different ones fails. To send this into another app, install a loopback device (`brew install blackhole-2ch`) and a **Create routing device** button will appear here.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+
             Section("Monitoring") {
                 Picker("Send to speakers", selection: $engine.monitorSource) {
                     ForEach(MonitorSource.allCases) { Text($0.rawValue).tag($0) }
@@ -700,6 +843,24 @@ struct ContentView: View {
                     "No headphones? Turn off \"Play processed audio out loud\" on the Output tab. Recording keeps working with the speakers silent."
                 ])
 
+                helpSection("Using this as a mic in Zoom, Discord or OBS", steps: [
+                    "Install a loopback device. BlackHole is free and open source. If it doesn't appear afterwards, run `sudo killall coreaudiod` — CoreAudio only scans for new drivers at launch.",
+                    "On the **Output** tab, press **Create routing device**. That builds an aggregate of your microphone and BlackHole and selects it for you; there's no need to touch Audio MIDI Setup.",
+                    "In Zoom, Discord or OBS, choose **BlackHole 2ch** as the microphone.",
+                    "Press **Start** here. The other app now hears your scrambled voice."
+                ])
+
+                copyableCommand("brew install blackhole-2ch")
+
+                helpSection("Why the setup looks like that", bullets: [
+                    "macOS will not let one app's output be another app's microphone, so something has to present itself as a real input device in between. That is what BlackHole does.",
+                    "The device list here only shows devices with **both** input and output. AVAudioEngine drives both directions from one device — pairing a separate mic and output fails outright — which is why the two have to be bundled into one aggregate device.",
+                    "Expect 40–90 ms of added delay end to end. Fine for a conversation, too much for anything that has to stay in sync with video you are also recording.",
+                    "If a virtual device accepts the settings but will not actually run, the app falls back to the system default and tells you. Some only work while their host app is running.",
+                    "The routing device carries your microphone on channel 0 and BlackHole's loopback after it. Only channel 0 is captured — otherwise the app would hear its own output and feed back.",
+                    "**Remove** on the Output tab deletes the routing device again. It is an ordinary aggregate device, so it also shows up in Audio MIDI Setup."
+                ])
+
                 helpSection(
                     "What this does and doesn't protect",
                     "This masks the **timbre** of your voice against casual listeners. It is not forensic-grade anonymity. A fixed pitch shift can be estimated and largely undone, and your cadence, vocabulary, accent, grammar, and background noise all survive the processing untouched. Treat it as a disguise, not as protection against someone who is determined and well-resourced."
@@ -715,6 +876,44 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.subheadline).bold()
             Text(.init(body)).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Numbered steps, for instructions where the order actually matters.
+    private func helpSection(_ title: String, steps: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline).bold()
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(index + 1).")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, alignment: .trailing)
+                    Text(.init(step))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func copyableCommand(_ command: String) -> some View {
+        HStack(spacing: 8) {
+            Text(command)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .font(.caption)
+            .buttonStyle(.borderless)
+            Spacer()
         }
     }
 

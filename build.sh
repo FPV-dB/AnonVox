@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="build/AnonVox.app"
-SOURCES=(VoiceScramblerApp.swift ContentView.swift VoiceScramblerEngine.swift VoiceDSP.swift)
+SOURCES=(VoiceScramblerApp.swift ContentView.swift VoiceScramblerEngine.swift VoiceDSP.swift AudioDevices.swift)
 
 if [[ "${1:-}" == "--icon" ]]; then
     xcrun swift make-icon.swift

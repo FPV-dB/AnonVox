@@ -173,11 +173,16 @@ extension ScramblerSettings {
         let t = max(0, min(1, amount))
         var result = self
 
+        // Use (1-t)·a + t·b rather than a + (b-a)·t. The latter does not
+        // return exactly `b` at t = 1 in floating point — 0.22 to 0.15 lands
+        // on 0.15000000000000002 — which makes the endpoints not quite equal
+        // the presets they came from.
         for key in Self.floatKeys {
-            result[keyPath: key] = self[keyPath: key] + (other[keyPath: key] - self[keyPath: key]) * t
+            result[keyPath: key] = (1 - t) * self[keyPath: key] + t * other[keyPath: key]
         }
+        let td = Double(t)
         for key in Self.doubleKeys {
-            result[keyPath: key] = self[keyPath: key] + (other[keyPath: key] - self[keyPath: key]) * Double(t)
+            result[keyPath: key] = (1 - td) * self[keyPath: key] + td * other[keyPath: key]
         }
 
         let dominant = t < 0.5 ? self : other
@@ -429,23 +434,46 @@ enum ScramblerPreset: String, CaseIterable, Identifiable {
 /// feed a time effect. The cost is roughly one buffer of extra latency.
 final class VoiceScramblerEngine: ObservableObject {
 
-    private let engine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
+    /// Not a `let`: selecting a different device needs a fresh engine, because
+    /// an already-initialised HAL unit rejects `setDeviceID`.
+    private var engine = AVAudioEngine()
+    private var needsEngineRebuild = false
+    private var playerNode = AVAudioPlayerNode()
     /// Converts the mic's format into the chain's processing format. The mic is
     /// often mono, and AVAudioUnitReverb only accepts stereo — connecting it to
     /// a mono bus fails with kAudioUnitErr_FormatNotSupported (-10868).
-    private let formatMixer = AVAudioMixerNode()
-    private let pitchUnit = AVAudioUnitTimePitch()
-    private let eqUnit = AVAudioUnitEQ(numberOfBands: 5)
-    private let distortionUnit = AVAudioUnitDistortion()
-    private let delayUnit = AVAudioUnitDelay()
-    private let reverbUnit = AVAudioUnitReverb()
-    private let compressorUnit = AVAudioUnitEffect(audioComponentDescription:
-        AudioComponentDescription(componentType: kAudioUnitType_Effect,
-                                  componentSubType: kAudioUnitSubType_DynamicsProcessor,
-                                  componentManufacturer: kAudioUnitManufacturer_Apple,
-                                  componentFlags: 0,
-                                  componentFlagsMask: 0))
+    private var formatMixer = AVAudioMixerNode()
+    private var pitchUnit = AVAudioUnitTimePitch()
+    private var eqUnit = AVAudioUnitEQ(numberOfBands: 5)
+    private var distortionUnit = AVAudioUnitDistortion()
+    private var delayUnit = AVAudioUnitDelay()
+    private var reverbUnit = AVAudioUnitReverb()
+    private var compressorUnit = VoiceScramblerEngine.makeCompressor()
+
+    private static func makeCompressor() -> AVAudioUnitEffect {
+        AVAudioUnitEffect(audioComponentDescription:
+            AudioComponentDescription(componentType: kAudioUnitType_Effect,
+                                      componentSubType: kAudioUnitSubType_DynamicsProcessor,
+                                      componentManufacturer: kAudioUnitManufacturer_Apple,
+                                      componentFlags: 0,
+                                      componentFlagsMask: 0))
+    }
+
+    /// A device change needs an engine that has never been initialised, and
+    /// nodes that have never been attached to another engine — reusing either
+    /// leaves the graph unable to start.
+    private func rebuildEngineAndNodes() {
+        engine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+        formatMixer = AVAudioMixerNode()
+        pitchUnit = AVAudioUnitTimePitch()
+        eqUnit = AVAudioUnitEQ(numberOfBands: 5)
+        distortionUnit = AVAudioUnitDistortion()
+        delayUnit = AVAudioUnitDelay()
+        reverbUnit = AVAudioUnitReverb()
+        compressorUnit = Self.makeCompressor()
+        configureEffects()
+    }
 
     /// Last effect in the chain — what we play out and what we record.
     private var outputTapNode: AVAudioNode { compressorUnit }
@@ -472,6 +500,14 @@ final class VoiceScramblerEngine: ObservableObject {
     private var meterTimer: Timer?
 
     private var tapFormat: AVAudioFormat?
+    /// Mono format the captured audio is reduced to before processing.
+    ///
+    /// Aggregate devices concatenate their subdevices' channels, so a
+    /// "mic + BlackHole" aggregate presents the mic on channel 0 and
+    /// BlackHole's loopback on channels 1-2 — which is this app's own output.
+    /// Capturing every channel would feed that straight back in. Voice is mono
+    /// anyway, so taking channel 0 is both the right source and the fix.
+    private var captureFormat: AVAudioFormat?
     private var lfoTimer: Timer?
     private var lfoPhase: Double = 0
     private var randomHold: Float = 0
@@ -494,6 +530,90 @@ final class VoiceScramblerEngine: ObservableObject {
     /// properties, which must not be touched from an audio thread.
     private var cachedSpectralParameters = SpectralVoiceProcessor.Parameters()
     private var cachedPhaserParameters = Phaser.Parameters()
+
+    // MARK: Device selection
+
+    /// `nil` means follow the system default.
+    @Published var selectedDeviceID: AudioDeviceID? {
+        didSet {
+            guard oldValue != selectedDeviceID else { return }
+            needsEngineRebuild = true
+            if isRunning { restart() }
+        }
+    }
+    @Published private(set) var availableDevices: [AudioDevice] = AudioDeviceCatalog.all()
+    @Published private(set) var activeSampleRate: Double = 0
+
+    /// Devices that can run the whole chain. Input-only devices are excluded
+    /// because AVAudioEngine cannot pair them with a different output.
+    var selectableDevices: [AudioDevice] { availableDevices.filter(\.isDuplex) }
+
+    var selectedDevice: AudioDevice? {
+        selectedDeviceID.flatMap { id in availableDevices.first { $0.id == id } }
+    }
+
+    /// A loopback device (BlackHole and friends) if one is installed.
+    var loopbackDevice: AudioDevice? { availableDevices.first(where: \.isLoopback) }
+
+    /// The aggregate this app creates, if it exists.
+    var routingDevice: AudioDevice? {
+        availableDevices.first { $0.name == AudioDeviceCatalog.routingDeviceName }
+    }
+
+    /// A real, physical-ish input to pair with the loopback: anything that
+    /// takes audio in and isn't itself a loopback or an aggregate.
+    var candidateMicrophone: AudioDevice? {
+        let defaultID = AudioDeviceCatalog.defaultInputID()
+        let usable = availableDevices.filter { $0.inputChannels > 0 && !$0.isLoopback && !$0.isAggregate }
+        return usable.first { $0.id == defaultID } ?? usable.first
+    }
+
+    /// Builds the mic + loopback aggregate and selects it, so the processed
+    /// voice becomes available to other apps as a microphone.
+    func createRoutingDevice() {
+        guard let loopback = loopbackDevice else {
+            errorMessage = "No loopback device found. Install one first (brew install blackhole-2ch)."
+            return
+        }
+        guard let microphone = candidateMicrophone else {
+            errorMessage = "No microphone available to pair with \(loopback.name)."
+            return
+        }
+        do {
+            let id = try AudioDeviceCatalog.createRoutingDevice(microphone: microphone, loopback: loopback)
+            refreshDevices()
+            selectedDeviceID = id
+            errorMessage = "Created \"\(AudioDeviceCatalog.routingDeviceName)\" from \(microphone.name) + \(loopback.name). Choose \(loopback.name) as the microphone in the other app."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeRoutingDevice() {
+        guard let device = routingDevice else { return }
+        if selectedDeviceID == device.id { selectedDeviceID = nil }
+        do {
+            try AudioDeviceCatalog.removeRoutingDevice(device.id)
+            refreshDevices()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func refreshDevices() {
+        availableDevices = AudioDeviceCatalog.all()
+        // Drop a selection whose device has gone away.
+        if let id = selectedDeviceID, !availableDevices.contains(where: { $0.id == id }) {
+            selectedDeviceID = nil
+            errorMessage = "That audio device disappeared — back to the system default."
+        }
+    }
+
+    private func restart() {
+        stop()
+        start()
+    }
 
     @Published private(set) var isRunning = false
     @Published var errorMessage: String?
@@ -1015,6 +1135,27 @@ final class VoiceScramblerEngine: ObservableObject {
     func start() {
         guard !isRunning else { return }
 
+        if needsEngineRebuild {
+            rebuildEngineAndNodes()
+            needsEngineRebuild = false
+        }
+
+        // Must happen before any format is read: reading initialises the HAL
+        // unit, after which setDeviceID fails. Both directions get the same
+        // device — different ones fail with -10851.
+        if let deviceID = selectedDeviceID {
+            do {
+                try engine.inputNode.auAudioUnit.setDeviceID(deviceID)
+                try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
+            } catch {
+                let label = selectedDevice?.name ?? "that device"
+                errorMessage = "Couldn't use \(label) — falling back to the system default. Devices offering both input and output are required."
+                selectedDeviceID = nil
+                needsEngineRebuild = false
+                rebuildEngineAndNodes()
+            }
+        }
+
         let input = engine.inputNode
         let format = input.inputFormat(forBus: 0)
 
@@ -1023,6 +1164,13 @@ final class VoiceScramblerEngine: ObservableObject {
             return
         }
         tapFormat = format
+        activeSampleRate = format.sampleRate
+
+        guard let capture = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1) else {
+            errorMessage = "Couldn't build a capture format for this device."
+            return
+        }
+        captureFormat = capture
 
         // Everything after the conversion mixer runs in stereo at the mic's rate.
         let processing = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate,
@@ -1032,7 +1180,7 @@ final class VoiceScramblerEngine: ObservableObject {
             engine.attach(node)
         }
 
-        engine.connect(playerNode, to: formatMixer, format: format)
+        engine.connect(playerNode, to: formatMixer, format: capture)
         engine.connect(formatMixer, to: pitchUnit, format: processing)
         engine.connect(pitchUnit, to: eqUnit, format: processing)
         engine.connect(eqUnit, to: distortionUnit, format: processing)
@@ -1041,7 +1189,7 @@ final class VoiceScramblerEngine: ObservableObject {
         engine.connect(reverbUnit, to: compressorUnit, format: processing)
         engine.connect(compressorUnit, to: engine.mainMixerNode, format: processing)
 
-        spectralProcessors = (0..<Int(format.channelCount)).map { _ in
+        spectralProcessors = (0..<1).map { _ in
             SpectralVoiceProcessor(sampleRate: Float(format.sampleRate),
                                    fftSize: 1024,
                                    overlap: 4,
@@ -1053,7 +1201,7 @@ final class VoiceScramblerEngine: ObservableObject {
         applyBypass()
         cachedSpectralParameters = currentSpectralParameters()
 
-        phasers = (0..<Int(format.channelCount)).map { _ in
+        phasers = (0..<1).map { _ in
             Phaser(sampleRate: Float(format.sampleRate))
         }
 
@@ -1069,14 +1217,36 @@ final class VoiceScramblerEngine: ObservableObject {
 
         do {
             try engine.start()
+            guard engine.isRunning else {
+                let label = selectedDevice?.name ?? "the selected device"
+                errorMessage = "\(label) accepted the settings but wouldn't start. Some virtual devices only run while their host app is active."
+                teardownGraph()
+                if selectedDeviceID != nil {
+                    selectedDeviceID = nil      // falls back to the default next time
+                }
+                return
+            }
             playerNode.play()
             isRunning = true
             errorMessage = nil
             startLFO()
             startMeters()
         } catch {
-            errorMessage = "Couldn't start audio engine: \(error.localizedDescription)"
             teardownGraph()
+            // A device can pass configuration and still refuse to run — some
+            // virtual devices renegotiate their format when idle. Rather than
+            // leave the app dead, drop back to the system default and retry
+            // once. The nil check stops this recursing.
+            if selectedDeviceID != nil {
+                let label = selectedDevice?.name ?? "that device"
+                selectedDeviceID = nil
+                start()
+                errorMessage = isRunning
+                    ? "Couldn't run on \(label) — using the system default instead."
+                    : "Couldn't start audio engine: \(error.localizedDescription)"
+                return
+            }
+            errorMessage = "Couldn't start audio engine: \(error.localizedDescription)"
         }
     }
 
@@ -1091,6 +1261,7 @@ final class VoiceScramblerEngine: ObservableObject {
         inputLevel = 0
         outputLevel = 0
         dspLoad = 0
+        activeSampleRate = 0
 
         // Order matters: the tap reads `spectralProcessors`, so it has to stop
         // firing before those are released. Freeing them first races the
@@ -1109,8 +1280,8 @@ final class VoiceScramblerEngine: ObservableObject {
     /// The tap reuses its buffer, so copy the samples before handing them off
     /// to the player node.
     private func enqueue(_ buffer: AVAudioPCMBuffer) {
-        guard let format = tapFormat,
-              let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength),
+        guard let capture = captureFormat,
+              let copy = AVAudioPCMBuffer(pcmFormat: capture, frameCapacity: buffer.frameLength),
               let source = buffer.floatChannelData,
               let destination = copy.floatChannelData
         else { return }
@@ -1120,31 +1291,28 @@ final class VoiceScramblerEngine: ObservableObject {
 
         let startedAt = CFAbsoluteTimeGetCurrent()
         let parameters = cachedSpectralParameters
-        // Local snapshot: never subscript the shared array from this thread.
+        // Local snapshots: never subscript the shared arrays from this thread.
         let processors = spectralProcessors
         let phaserUnits = phasers
         let phaserParameters = cachedPhaserParameters
-        var inputPeak: Float = 0
-        var outputPeak: Float = 0
 
-        for channel in 0..<Int(format.channelCount) {
-            let out = destination[channel]
-            out.update(from: source[channel], count: frames)
+        // Channel 0 only — see `captureFormat`.
+        let out = destination[0]
+        out.update(from: source[0], count: frames)
 
-            var peak: Float = 0
-            vDSP_maxmgv(out, 1, &peak, vDSP_Length(frames))
-            inputPeak = max(inputPeak, peak)
+        var peak: Float = 0
+        vDSP_maxmgv(out, 1, &peak, vDSP_Length(frames))
+        let inputPeak = peak
 
-            if channel < processors.count {
-                processors[channel].process(out, count: frames, parameters: parameters)
-            }
-            if channel < phaserUnits.count {
-                phaserUnits[channel].process(out, count: frames, parameters: phaserParameters)
-            }
-
-            vDSP_maxmgv(out, 1, &peak, vDSP_Length(frames))
-            outputPeak = max(outputPeak, peak)
+        if let processor = processors.first {
+            processor.process(out, count: frames, parameters: parameters)
         }
+        if let phaser = phaserUnits.first {
+            phaser.process(out, count: frames, parameters: phaserParameters)
+        }
+
+        vDSP_maxmgv(out, 1, &peak, vDSP_Length(frames))
+        let outputPeak = peak
 
         // Plain stores, read by a timer on the main thread. No allocation, no
         // locking and no publishing from the audio thread.
@@ -1152,7 +1320,7 @@ final class VoiceScramblerEngine: ObservableObject {
         meterOutputPeak = outputPeak
         if outputPeak >= 0.999 { meterClipped = true }
         let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
-        let bufferDuration = Double(frames) / format.sampleRate
+        let bufferDuration = Double(frames) / capture.sampleRate
         if bufferDuration > 0 {
             meterDSPLoad = Float(elapsed / bufferDuration)
         }
@@ -1164,6 +1332,7 @@ final class VoiceScramblerEngine: ObservableObject {
     private func teardownGraph() {
         engine.inputNode.removeTap(onBus: 0)
         tapFormat = nil
+        captureFormat = nil
 
         for node in effectNodes {
             engine.disconnectNodeInput(node)
