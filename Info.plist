@@ -5,7 +5,7 @@
 	<key>CFBundleName</key>
 	<string>AnonVox</string>
 	<key>CFBundleDisplayName</key>
-	<string>Voice Scrambler</string>
+	<string>AnonVox</string>
 	<key>CFBundleExecutable</key>
 	<string>AnonVox</string>
 	<key>CFBundleIconFile</key>

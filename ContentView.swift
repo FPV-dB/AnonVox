@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AppKit
 import CoreAudio
 
 
@@ -157,9 +158,12 @@ struct ContentView: View {
     @State private var savedSettingsName = ""
 
     var body: some View {
-        VStack(spacing: 14) {
-            Text("Voice Scrambler")
-                .font(.title2).bold()
+        ZStack {
+            osintBackground
+
+            VStack(spacing: 14) {
+                Text("AnonVox")
+                    .font(.title2).bold()
 
             HStack(spacing: 10) {
                 Button(action: toggle) {
@@ -212,17 +216,18 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
             }
 
-            TabView {
-                identityTab.tabItem { Label("Identity", systemImage: "person.crop.circle.badge.questionmark") }
-                pitchTab.tabItem { Label("Pitch", systemImage: "waveform.path") }
-                eqTab.tabItem { Label("EQ", systemImage: "slider.vertical.3") }
-                effectsTab.tabItem { Label("Effects", systemImage: "wand.and.stars") }
-                outputTab.tabItem { Label("Output", systemImage: "speaker.wave.2") }
-                recordTab.tabItem { Label("Record", systemImage: "record.circle") }
-                helpTab.tabItem { Label("Help", systemImage: "questionmark.circle") }
+                TabView {
+                    identityTab.tabItem { Label("Identity", systemImage: "person.crop.circle.badge.questionmark") }
+                    pitchTab.tabItem { Label("Pitch", systemImage: "waveform.path") }
+                    eqTab.tabItem { Label("EQ", systemImage: "slider.vertical.3") }
+                    effectsTab.tabItem { Label("Effects", systemImage: "wand.and.stars") }
+                    outputTab.tabItem { Label("Output", systemImage: "speaker.wave.2") }
+                    recordTab.tabItem { Label("Record", systemImage: "record.circle") }
+                    helpTab.tabItem { Label("Help", systemImage: "questionmark.circle") }
+                }
             }
+            .padding(20)
         }
-        .padding(20)
         .confirmationDialog("Reset all sound settings to their defaults?",
                             isPresented: $showResetConfirmation,
                             titleVisibility: .visible) {
@@ -241,6 +246,26 @@ struct ContentView: View {
             .disabled(savedSettingsName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("Saving with an existing name updates that saved setting.")
+        }
+    }
+
+    @ViewBuilder
+    private var osintBackground: some View {
+        if let url = Bundle.main.url(forResource: "OSINTBackground", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            GeometryReader { geometry in
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .clipped()
+                    .opacity(0.42)
+                    .overlay(Color.black.opacity(0.48))
+            }
+            .ignoresSafeArea()
+            .accessibilityHidden(true)
+        } else {
+            Color.clear
         }
     }
 
