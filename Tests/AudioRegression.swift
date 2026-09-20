@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 @main
 struct AudioRegression {
@@ -81,6 +82,19 @@ struct AudioRegression {
         precondition(spectrum.count == 96 && spectrum.max()! > 0.5,
                      "Spectrum analyser did not produce visible bands")
 
-        print("PASS: DSP, 196 preset blend pairs, settings persistence, spectrum analyser, default EQ and distortion bypass")
+        let signingKey = Curve25519.Signing.PrivateKey()
+        let payload = ProLicensePayload(id: UUID(), name: "Test License", issuedAt: Date())
+        let licenseEncoder = JSONEncoder()
+        licenseEncoder.dateEncodingStrategy = .iso8601
+        licenseEncoder.outputFormatting = [.sortedKeys]
+        let payloadData = try! licenseEncoder.encode(payload)
+        let signature = try! signingKey.signature(for: payloadData)
+        let serial = "ANVX1.\(payloadData.base64URLString).\(signature.base64URLString)"
+        let publicKey = signingKey.publicKey.rawRepresentation.base64EncodedString()
+        precondition(ProLicenseVerifier.verify(serial: serial, publicKeyBase64: publicKey)?.name == "Test License")
+        precondition(ProLicenseVerifier.verify(serial: serial + "x", publicKeyBase64: publicKey) == nil,
+                     "Tampered serial was accepted")
+
+        print("PASS: DSP, presets, saved settings, spectrum analyser, signed Pro serials, default EQ and distortion bypass")
     }
 }

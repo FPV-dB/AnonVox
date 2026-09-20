@@ -84,6 +84,27 @@ While processing is running, a waterfall spectrum shows the final processed
 signal after EQ, effects and compression. Frequency runs from 60 Hz to 12 kHz
 left to right, time moves downward, and the newest slice is at the bottom.
 
+### Pro serials
+
+The title-bar **Unlock Pro** button accepts offline signed serials. A valid
+serial persists in user defaults and shows the licensed name; edited, damaged,
+or randomly generated strings are rejected. The app embeds only a Curve25519
+public key, so the public source can check licenses without being able to issue
+them. Pro status is intentionally a capability flag for future paid features;
+this revision does not remove or disable any existing audio controls.
+
+Generate a customer serial with the separate signing tool:
+
+```sh
+xcrun swift Tools/GenerateProSerial.swift /secure/path/anonvox-license-keypair.txt "Customer Name"
+```
+
+The private key file's first line is its base64 private key. Keep that file
+outside the repository and backups should be access-controlled: anyone with it
+can create accepted serials. Losing it means no more serials can be issued for
+this app build. The serial contains a random license ID, licensed name and issue
+date; it contains no device identifier and can be moved between Macs.
+
 **Blend** mixes two presets. Continuous parameters interpolate; discrete ones
 (LFO shape, distortion character, reverb space, stage count, switches) snap to
 whichever side the slider favours, since averaging them is meaningless. The
